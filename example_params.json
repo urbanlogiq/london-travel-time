@@ -1,0 +1,16 @@
+{
+  "params": [
+    {
+      "ul_node_id": "058kjDnuc+CDAfyiLei+Cw==",
+      "start_time": 1612569600000,
+      "end_time": 1612652400000,
+      "interval": 3600
+    },
+    {
+      "ul_node_id": "acGBlAS6mOixck/4YKSMwA==",
+      "start_time": 1612569600000,
+      "end_time": 1612652400000,
+      "interval": 900
+    }
+  ]
+}
