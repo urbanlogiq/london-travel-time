@@ -1,84 +1,163 @@
 package com.urbanlogiq.traveltimeexample;
 
-import com.google.gson.Gson;
-import com.google.gson.stream.JsonReader;
-import com.beust.jcommander.Parameter;
-import com.beust.jcommander.JCommander;
-import com.urbanlogiq.traveltimeexample.fbs.Job;
-import com.urbanlogiq.traveltimeexample.fbs.Status;
-import com.urbanlogiq.traveltimeexample.fbs.Task;
-
+import java.io.ByteArrayOutputStream;
 import java.io.FileReader;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
+import com.urbanlogiq.ulsdk.Key;
+import com.urbanlogiq.ulsdk.Region;
+import com.urbanlogiq.ulsdk.Environment;
+import com.urbanlogiq.ulsdk.ApiKeyContext;
+import com.urbanlogiq.ulsdk.api.schematicevaluator.SchematicEvaluator;
+import com.urbanlogiq.ulsdk.api.datacatalog.Datacatalog;
+import com.urbanlogiq.ulsdk.types.ObjectId;
+import com.urbanlogiq.ulsdk.types.RunSpec;
+import com.urbanlogiq.ulsdk.types.Job;
+import com.urbanlogiq.ulsdk.types.EmbeddedTable;
+import com.urbanlogiq.ulsdk.types.ParamIndices;
+import com.urbanlogiq.ulsdk.types.Status;
+import com.urbanlogiq.ulsdk.types.Task;
+import com.urbanlogiq.ulsdk.types.TaskParameter;
+import com.urbanlogiq.ulsdk.types.TaskParameterValue;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.TimeStampMilliVector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 
-/**
- * This example will kick off a travel time job using the UrbanLogiq REST API with parameters that you specify
- * in a json file.  Once the job completes, it will write the results to a file in xlsx, csv of json format.
- *
- * Use "--params <filename.json>" or "-p <filename.json>" as a command line argument to specify the json file
- * containing the parameters.  If nothing is specify, then the program looks for "example_params.json" in the
- * program home directory (where a working example has been provided).
- *
- * Use "--format [xlsx/csv/json]" or "-f [xlsx/csv/json]" as a command line argument to specify the format to
- * write the results file in.  The results file will be named with a guid seeded from the worklog id (the unit of
- * work associated with the job that ran)
- */
 public class TravelTimeExample {
-    @Parameter(names={"--params", "-p"})
-    private static String paramsFilename = "example_params.json";
+    static class Parameter {
+        String _realm;
+        String _nodeId;
+        long _startTime;
+        long _endTime;
+        int _interval;
 
-    @Parameter(names={"--format", "-f"})
-    private static String format = "xlsx";
+        Parameter(String realm, String nodeId, long startTime, long endTime, int interval) {
+            this._realm = realm;
+            this._nodeId = nodeId;
+            this._startTime = startTime;
+            this._endTime = endTime;
+            this._interval = interval;
+        }
+    }
 
-    public static void main(String[] args) throws Exception {
-        TravelTimeExample travelTimeExample = new TravelTimeExample();
-        JCommander.newBuilder()
-                .addObject(travelTimeExample)
-                .build()
-                .parse(args);
+    static byte[] writeArrowParameters(Parameter[] parameters) throws java.io.IOException {
+        RootAllocator allocator = new RootAllocator();
+        VarCharVector realms = new VarCharVector("realm", allocator);
+        VarCharVector nodeIds = new VarCharVector("ul_node_id", allocator);
+        TimeStampMilliVector startTimes = new TimeStampMilliVector("start_time", allocator);
+        TimeStampMilliVector endTimes = new TimeStampMilliVector("end_time", allocator);
+        IntVector intervals = new IntVector("interval", allocator);
 
-        UrbanLogiqAPIUtil ulApiUtil = new UrbanLogiqAPIUtil();
-        Gson gson = new Gson();
-
-        // Fill in example config.json file with your credentials and provided ids
-        Map<String, String> config = null;
-        try(JsonReader reader = new JsonReader(new FileReader("config.json"));) {
-            config = gson.fromJson(reader, Map.class);
+        for (int i = 0; i < parameters.length; ++i) {
+            Parameter p = parameters[i];
+            realms.setSafe(i, p._realm.getBytes(StandardCharsets.UTF_8));
+            nodeIds.setSafe(i, p._nodeId.getBytes(StandardCharsets.UTF_8));
+            startTimes.setSafe(i, p._startTime);
+            endTimes.setSafe(i, p._endTime);
+            intervals.setSafe(i, p._interval);
         }
 
-        // ---- 1. Get access token for all UrbanLogiq requests -----
-        // Get access token given client id provided and your urbanlogiq login email and password
-        String token = ulApiUtil.getToken(config.get("client_id"), config.get("username"), config.get("password"));
+        int nparams = parameters.length;
+        realms.setValueCount(nparams);
+        nodeIds.setValueCount(nparams);
+        startTimes.setValueCount(nparams);
+        endTimes.setValueCount(nparams);
+        intervals.setValueCount(nparams);
 
-        // ---- 2. Kick off a travel time job -----
-        List<Map> params = null;
-        try(JsonReader reader = new JsonReader(new FileReader(paramsFilename));) {
-            Map<String, List> paramsJson = gson.fromJson(reader, Map.class);
-            params = paramsJson.get("params");
-        }
-        // Build the runspec i.e. the instructions for running the job
-        byte[] runspec = ulApiUtil.buildRunspec(config.get("schematic"), config.get("realm"), params);
-        // Send the job to the schematic evaluator
-        String jobId = ulApiUtil.postJob(token, runspec);
+        List<Field> fields = Arrays.asList(realms.getField(), nodeIds.getField(), startTimes.getField(), endTimes.getField(), intervals.getField());
+        List<FieldVector> vectors = Arrays.asList(realms, nodeIds, startTimes, endTimes, intervals);
+        VectorSchemaRoot root = new VectorSchemaRoot(fields, vectors);
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        ArrowStreamWriter writer = new ArrowStreamWriter(root, null, stream);
 
-        // ---- 3. Wait for the job to complete ----
-        Job job = ulApiUtil.getJob(token, jobId);
-        while (job == null || (job.status() != Status.Complete && job.status() != Status.Error)) {
-            job = ulApiUtil.getJob(token, jobId);
-        }
-        if (job.status() == Status.Error) {
-            throw new UrbanLogiqAPIException("Job failed. Please contact UrbanLogiq.");
-        }
+        writer.start();
+        writer.writeBatch();
+        writer.end();
 
-        // ---- 4. Fetch the job results -----
-        // There is a single task in the travel time job
-        Task task = job.tasks(0);
-        // A task produces a worklog, which groups all the output data together
-        String worklogId = ulApiUtil.extractGuidFromObjectId(task.output());
-        // Format argument can be any of the following: "csv", "xlsx", "json", it is "xlsx" by default
-        // If format argument is missing from the request, data will be returned in arrow ipc format.
-        String filename = ulApiUtil.writeResultsToFile(token, worklogId, format);
-        System.out.println(String.format("Results written to %s", filename));
+        return stream.toByteArray();
+    }
+
+    static TaskParameter[] serializeParameters(Parameter[] parameters) throws java.io.IOException {
+        byte[] arrowParameters = writeArrowParameters(parameters);
+
+        EmbeddedTable parameterTable = new EmbeddedTable();
+        parameterTable.setV(arrowParameters);
+
+        TaskParameterValue value = new TaskParameterValue(parameterTable);
+        TaskParameter taskParameter = new TaskParameter();
+        taskParameter.setKey("params");
+        taskParameter.setValue(value);
+
+        return new TaskParameter[]{taskParameter};
+    }
+
+    static void fetchTravelTime(ApiKeyContext ctx, Parameter[] parameters) throws java.io.IOException, java.net.URISyntaxException, java.lang.InterruptedException {
+        TaskParameter[] serializedParameters = serializeParameters(parameters);
+        ParamIndices idx = new ParamIndices();
+        idx.setIdxs(new int[]{ 0 });
+        ParamIndices[] paramIndices = new ParamIndices[] { idx };
+
+        RunSpec runSpec = new RunSpec();
+        // This GUID is hardcoded for the travel time data processing job, please
+        // do not change this.
+        runSpec.setSchematic(new ObjectId("00004592-295a-f146-edf2-51b16ffb3252"));
+        runSpec.setParams(serializedParameters);
+        runSpec.setParamIndices(paramIndices);
+
+        ObjectId id = SchematicEvaluator.createJob(
+            ctx,
+            runSpec
+        );
+
+        while (true) {
+            Job job = SchematicEvaluator.getJob(ctx, id.toId(), null);
+            byte status = job.getStatus();
+            if (status == Status.Pending || status == Status.Running) {
+                continue;
+            }
+
+            if (status == Status.Complete) {
+                Task[] tasks = job.getTasks();
+                Task travelTimeTask = tasks[0];
+                UUID outputStream = travelTimeTask.getOutput().toId();
+                byte[] csv = Datacatalog.streamGetCsv(ctx, outputStream);
+
+                // At this point you can do with the content what you wish, here
+                // we just write it out to the terminal.
+                System.out.println(new String(csv));
+                break;
+            }
+
+            throw new RuntimeException("travel time job failed");
+        }
+    }
+
+    public static void main(String[] args) throws java.io.IOException, java.net.URISyntaxException, java.lang.InterruptedException {
+        // These are sample parameters which can be replaced with the necessary
+        // parameters as required in order to retrieve your travel time results.
+        Parameter[] sampleParameters = new Parameter[] {
+            new Parameter("3dcf2d3e-cafd-4f79-b93d-ab09044a005d", "058kjDnuc+CDAfyiLei+Cw==", 1612569600000L, 1612652400000L, 3600),
+            new Parameter("3dcf2d3e-cafd-4f79-b93d-ab09044a005d", "acGBlAS6mOixck/4YKSMwA==", 1612569600000L, 1612652400000L, 3600),
+        };
+
+        // Instead of using a username and password, the UrbanLogiq SDK uses signed
+        // requests. These require an access key ID and a secret key, which can be
+        // managed in the UrbanLogiq portal at https://home.urbanlogiq.ca/admin/keys
+        UUID userId = UUID.fromString(System.getenv("USER_ID"));
+        String accessKey = System.getenv("ACCESS_KEY");
+        String secretKey = System.getenv("SECRET_KEY");
+
+        Key key = new Key(userId, Region.CA, accessKey, secretKey);
+        ApiKeyContext ctx = new ApiKeyContext(key, Environment.Prod);
+
+        fetchTravelTime(ctx, sampleParameters);
     }
 }
