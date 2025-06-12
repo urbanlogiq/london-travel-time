@@ -118,7 +118,7 @@ public class TravelTimeExample {
         );
 
         while (true) {
-            Job job = SchematicEvaluator.getJob(ctx, id.toId(), null);
+            Job job = SchematicEvaluator.getJob(ctx, id, null);
             byte status = job.getStatus();
             if (status == Status.Pending || status == Status.Running) {
                 continue;
@@ -127,7 +127,7 @@ public class TravelTimeExample {
             if (status == Status.Complete) {
                 Task[] tasks = job.getTasks();
                 Task travelTimeTask = tasks[0];
-                UUID outputStream = travelTimeTask.getOutput().toId();
+                ObjectId outputStream = travelTimeTask.getOutput();
                 byte[] csv = Datacatalog.streamGetCsv(ctx, outputStream);
 
                 // At this point you can do with the content what you wish, here
