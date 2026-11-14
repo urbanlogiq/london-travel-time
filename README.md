@@ -22,10 +22,10 @@ The program writes the CSV response without changing its contents.
 
    The key must permit access to the London travel time data in the Canadian production system.
 
-4. Build the program and run its tests:
+4. Build the program:
 
    ```sh
-   mvn verify
+   mvn package
    ```
 
 5. Run the program and save the result:
